@@ -1,0 +1,16 @@
+configfile: "config.yaml"
+
+
+rule download:
+    input:
+        handlers=config["handlers"],
+    output:
+        path="downloads/{version}/{file}",
+        provenance="downloads/{version}/{file}.provenance.yaml",
+    log:
+        "logs/{version}/{file}.log",
+    params:
+        dataset=config["dataset"],
+        spec=config["spec"],
+    wrapper:
+        "master/download"

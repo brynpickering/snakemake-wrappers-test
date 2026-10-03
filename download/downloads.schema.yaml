@@ -1,0 +1,107 @@
+$schema: "https://json-schema.org/draft/2020-12/schema"
+description: >
+  Schema for the registry of downloaded datasets.
+  The module registry and the user `downloads` configuration have this structure.
+  The user configuration is merged into the module registry before validation.
+
+$defs:
+  host:
+    description: >
+      A location the files of a dataset version can be fetched from.
+      `null` removes a host defined at the dataset level.
+    anyOf:
+      - type: "null"
+      - type: object
+        additionalProperties: false
+        required: [url, priority]
+        properties:
+          kind:
+            description: "'file' hosts are fetched over HTTP(S) or file://. 'api' hosts use the `fetch` function of a module handler."
+            type: string
+            enum: ["file", "api"]
+            default: "file"
+          url:
+            description: URL template. Can use `{version}`, `{file}` and any file placeholder.
+            type: string
+          priority:
+            description: Hosts with a lower priority are tried first. Hosts with the same priority keep their order.
+            type: integer
+          handler:
+            description: Name of the module download handler for 'api' hosts.
+            type: string
+          extras:
+            description: >
+              Additional settings passed to the download handler.
+              Never put secrets here: give the name of the environment variable holding them.
+            type: object
+            default: {}
+        if:
+          properties:
+            kind:
+              const: api
+          required: [kind]
+        then:
+          required: [handler]
+
+  hosts:
+    description: Named hosts to fetch the files from.
+    type: object
+    additionalProperties:
+      $ref: "#/$defs/host"
+
+  version:
+    description: >
+      A dataset version. A version that is listed can be downloaded.
+      Its `hosts` are added to the dataset hosts: they can add new host names
+      or remove dataset hosts with `null`.
+    type: object
+    additionalProperties: false
+    properties:
+      tags:
+        description: Version status (deprecated, unpinned).
+        type: array
+        items:
+          type: string
+          enum: ["deprecated", "unpinned"]
+        default: []
+      note:
+        type: string
+      hosts:
+        $ref: "#/$defs/hosts"
+      sha256:
+        description: Expected SHA-256 checksums, keyed by file name. Files not listed are not checked.
+        type: object
+        additionalProperties:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+
+  dataset:
+    type: object
+    additionalProperties: false
+    required: [license, files, hosts, versions]
+    properties:
+      description:
+        type: string
+      version:
+        description: Default version. Must be a key of `versions`.
+        type: string
+      license:
+        type: string
+      files:
+        description: Local file name templates, relative to `<downloads>/{dataset}/{version}/`.
+        type: array
+        minItems: 1
+        uniqueItems: true
+        items:
+          type: string
+      hosts:
+        $ref: "#/$defs/hosts"
+      versions:
+        type: object
+        minProperties: 1
+        additionalProperties:
+          $ref: "#/$defs/version"
+
+type: object
+additionalProperties:
+  $ref: "#/$defs/dataset"

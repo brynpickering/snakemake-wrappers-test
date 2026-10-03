@@ -1,0 +1,34 @@
+dataset: fake
+spec:
+  license: CC-BY 4.0
+  files:
+    - data_{region}_{version}.txt
+  sha256: {}
+  tags:
+    - unpinned
+  note: Test dataset.
+handlers:
+  - download_fake.py
+_downloads:
+  hosts:
+    fake:
+      v1:
+        - name: api_broken
+          kind: api
+          url: fake://{region}
+          priority: 0
+          extras:
+            fail: API is down
+          handler: download_fake.py
+        - name: file_ok
+          kind: file
+          url: file:source/{version}/{region}.txt
+          priority: 1
+          extras: {}
+  settings:
+    user_agent: download-wrapper-tests
+    timeouts:
+      max_retries: 0
+      connect_seconds: 5
+      read_seconds: 5
+      initial_retry_seconds: 0
