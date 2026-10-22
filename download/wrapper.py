@@ -19,7 +19,6 @@ import re
 import shutil
 import string
 import sys
-import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -31,6 +30,8 @@ from urllib.request import url2pathname
 
 import requests
 import yaml
+from requests.adapters import HTTPAdapter
+from urllib3.util import Retry
 
 if TYPE_CHECKING:
     snakemake: Any
@@ -38,7 +39,7 @@ if TYPE_CHECKING:
 LOGGER = logging.getLogger(__name__)
 CHUNK_SIZE = 1024 * 1024
 RETRY_STATUS_CODES = {408, 429, 500, 502, 503, 504}
-RETRY_EXCEPTIONS = (
+STREAM_EXCEPTIONS = (
     requests.exceptions.ConnectionError,
     requests.exceptions.Timeout,
     requests.exceptions.ChunkedEncodingError,
@@ -63,9 +64,20 @@ class DownloadTimeouts:
         """Connect and read timeouts, as expected by `requests`."""
         return (self.connect_seconds, self.read_seconds)
 
-    def wait(self, retry_number: int, *, max_wait: float = 60) -> None:
-        """Sleep with exponential backoff for a retry number starting at 0."""
-        time.sleep(min(self.initial_retry_seconds * 2**retry_number, max_wait))
+    @property
+    def retry(self) -> Retry:
+        """Retry transient connection failures and status codes, with exponential backoff.
+
+        `Retry-After` headers are respected. The final response is returned as-is.
+        """
+        return Retry(
+            total=self.max_retries,
+            backoff_factor=self.initial_retry_seconds,
+            backoff_max=60,
+            status_forcelist=RETRY_STATUS_CODES,
+            allowed_methods={"GET"},
+            raise_on_status=False,
+        )
 
 
 @dataclass
@@ -90,29 +102,11 @@ class DownloadRequest:
         return os.environ[name]
 
     def get(self, url: str, **kwargs) -> requests.Response:
-        """GET a URL, retrying transient failures.
+        """GET a URL with the request timeouts, retrying transient failures.
 
         The final response is returned as-is: callers must check its status.
         """
-        for attempt in range(self.timeouts.max_retries + 1):
-            try:
-                response = self.session.get(
-                    url, timeout=self.timeouts.request_timeout, **kwargs
-                )
-            except RETRY_EXCEPTIONS as exc:
-                if attempt == self.timeouts.max_retries:
-                    raise RuntimeError(f"Failed request to {url!r}.") from exc
-                self.timeouts.wait(attempt)
-                continue
-            if (
-                response.status_code in RETRY_STATUS_CODES
-                and attempt < self.timeouts.max_retries
-            ):
-                response.close()
-                self.timeouts.wait(attempt)
-                continue
-            return response
-        raise RuntimeError(f"Maximum retries reached for {url!r}.")
+        return self.session.get(url, timeout=self.timeouts.request_timeout, **kwargs)
 
 
 Fetcher = Callable[[DownloadRequest], dict]
@@ -154,7 +148,8 @@ def reject_html(response: requests.Response, filename: str) -> None:
 def fetch_file(request: DownloadRequest) -> dict:
     """Fetch a file over HTTP(S) or copy it from a file:// URL.
 
-    HTTP downloads are resumed if the destination already holds a partial download.
+    HTTP downloads are resumed if the destination already holds a partial download
+    or if the connection drops while streaming.
     """
     url, destination, timeouts = request.url, request.destination, request.timeouts
     parsed = urlparse(url)
@@ -170,24 +165,24 @@ def fetch_file(request: DownloadRequest) -> dict:
     for attempt in range(timeouts.max_retries + 1):
         existing = destination.stat().st_size if destination.exists() else 0
         headers = {"Range": f"bytes={existing}-"} if existing else {}
-        try:
-            with request.get(url, headers=headers, stream=True) as response:
-                if response.status_code == 416:
-                    destination.unlink()
-                    continue
-                if response.status_code >= 400:
-                    raise HostError(f"HTTP {response.status_code} for {url!r}.")
-                reject_html(response, destination.name.removesuffix(".part"))
-                mode = "ab" if response.status_code == 206 else "wb"
+        with request.get(url, headers=headers, stream=True) as response:
+            if response.status_code == 416:
+                destination.unlink()
+                continue
+            if response.status_code >= 400:
+                raise HostError(f"HTTP {response.status_code} for {url!r}.")
+            reject_html(response, destination.name.removesuffix(".part"))
+            mode = "ab" if response.status_code == 206 else "wb"
+            try:
                 with destination.open(mode) as f:
                     for chunk in response.iter_content(CHUNK_SIZE):
                         f.write(chunk)
-            return {}
-        except RETRY_EXCEPTIONS as exc:
-            if attempt == timeouts.max_retries:
-                raise HostError(f"Download interrupted for {url!r}.") from exc
-            LOGGER.warning("Download interrupted, resuming (%s).", exc)
-            timeouts.wait(attempt)
+            except STREAM_EXCEPTIONS as exc:
+                if attempt == timeouts.max_retries:
+                    raise HostError(f"Download interrupted for {url!r}.") from exc
+                LOGGER.warning("Download interrupted, resuming (%s).", exc)
+                continue
+        return {}
     raise HostError(f"Could not download {url!r}.")
 
 
@@ -222,12 +217,15 @@ def download(
     settings: dict,
     output_path: Path,
     provenance_path: Path,
-    session: requests.Session,
 ) -> None:
     """Download a file from the first working host and record its provenance."""
     placeholders = match_file(spec["files"], version, file)
     timeouts = DownloadTimeouts(**settings["timeouts"])
+    session = requests.Session()
     session.headers["User-Agent"] = settings["user_agent"]
+    adapter = HTTPAdapter(max_retries=timeouts.retry)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     partial = output_path.with_name(output_path.name + ".part")
@@ -291,5 +289,4 @@ if __name__ == "__main__":
         settings=resolved["settings"],
         output_path=Path(snakemake.output.path),
         provenance_path=Path(snakemake.output.provenance),
-        session=requests.Session(),
     )

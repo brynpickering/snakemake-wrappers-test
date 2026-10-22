@@ -28,19 +28,28 @@ CONTENTS = {
     "api_ok": "api",
     "api_secret": "s3cret",
     "http_ok": "http",
+    "http_flaky": "http",
 }
 
 
 class FakeServer(http.server.BaseHTTPRequestHandler):
-    """Serve a file under `/ok`, an HTML page under `/html` and 404 errors elsewhere."""
+    """Serve a file under `/ok` and `/flaky` (after one 503), HTML under `/html`, 404 elsewhere."""
 
     def do_GET(self) -> None:
         """Respond to a file request."""
         routes = {
             "/ok/": ("application/octet-stream", b"http"),
+            "/flaky/": ("application/octet-stream", b"http"),
             "/html/": ("text/html", b"<html/>"),
         }
         prefix = "/" + self.path.split("/")[1] + "/"
+        if prefix == "/flaky/" and not self.server.flaky_failed:
+            self.server.flaky_failed = True
+            self.send_response(503)
+            self.send_header("Retry-After", "0")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         if prefix not in routes:
             self.send_error(404)
             return
@@ -59,6 +68,7 @@ class FakeServer(http.server.BaseHTTPRequestHandler):
 def http_server() -> Iterator[str]:
     """Root URL of a local HTTP server."""
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FakeServer)
+    server.flaky_failed = False
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     yield f"http://127.0.0.1:{server.server_port}"
@@ -100,6 +110,7 @@ def hosts(http_server: str) -> dict[str, dict]:
         host("api_broken", "fake://{region}", fail="API is down"),
         host("api_secret", "fake://{region}", token_env=TOKEN_ENV),
         host("http_ok", f"{http_server}/ok/{{file}}"),
+        host("http_flaky", f"{http_server}/flaky/{{file}}"),
         host("http_html", f"{http_server}/html/{{file}}"),
         host("http_404", f"{http_server}/missing/{{file}}"),
     ]
@@ -134,10 +145,16 @@ def run_download(
     file: str = FILE,
     sha256: dict[str, str] | None = None,
     env: dict[str, str] | None = None,
+    max_retries: int = 0,
 ) -> subprocess.CompletedProcess:
     """Download a file of the test dataset from the given hosts, in order."""
     handlers = sorted({item["handler"] for item in hosts if item["kind"] == "api"})
-    downloads = EXAMPLE["_downloads"] | {"hosts": {"fake": {VERSION: hosts}}}
+    settings = EXAMPLE["_downloads"]["settings"]
+    timeouts = settings["timeouts"] | {"max_retries": max_retries}
+    downloads = {
+        "hosts": {"fake": {VERSION: hosts}},
+        "settings": settings | {"timeouts": timeouts},
+    }
     config = EXAMPLE | {
         "spec": SPEC | {"sha256": sha256 or {}},
         "handlers": handlers,
@@ -214,6 +231,19 @@ def test_download_fails(
     result = run_download(workdir, [hosts[name]], file=file)
     assert result.returncode != 0
     assert message in read_log(workdir, file)
+
+
+@pytest.mark.parametrize(("max_retries", "returncode"), [(1, 0), (0, 1)])
+def test_retry(
+    workdir: Path, hosts: dict[str, dict], max_retries: int, returncode: int
+):
+    """Transient HTTP errors are retried up to `max_retries` times."""
+    result = run_download(workdir, [hosts["http_flaky"]], max_retries=max_retries)
+    assert result.returncode == returncode, result.stdout
+    if returncode:
+        assert "HTTP 503" in read_log(workdir)
+    else:
+        assert (workdir / f"downloads/{VERSION}/{FILE}").read_text() == "http"
 
 
 def test_secret(workdir: Path, hosts: dict[str, dict]):
