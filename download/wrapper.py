@@ -197,6 +197,16 @@ def load_fetcher(host: dict) -> Fetcher:
     return module.fetch
 
 
+def host_url(host: dict, version: str, file: str, placeholders: dict[str, str]) -> str:
+    """Fill in the URL of a host, failing if it needs a placeholder the file lacks."""
+    try:
+        return host["url"].format(version=version, file=file, **placeholders)
+    except KeyError as exc:
+        raise HostError(
+            f"URL {host['url']!r} needs placeholder {exc}, which {file!r} lacks."
+        ) from exc
+
+
 def verify_file(path: Path, expected: str | None) -> str:
     """Check that a file is non-empty and matches its SHA-256 checksum, if expected."""
     if not path.exists() or path.stat().st_size == 0:
@@ -231,13 +241,14 @@ def download(
     partial = output_path.with_name(output_path.name + ".part")
     errors = []
     for host in hosts:
-        url = host["url"].format(version=version, file=file, **placeholders)
-        LOGGER.info("Trying host %r: %s", host["name"], url)
-        request = DownloadRequest(
-            host, url, version, placeholders, partial, session, timeouts
-        )
+        url = host["url"]
         fetch = load_fetcher(host)
         try:
+            url = host_url(host, version, file, placeholders)
+            LOGGER.info("Trying host %r: %s", host["name"], url)
+            request = DownloadRequest(
+                host, url, version, placeholders, partial, session, timeouts
+            )
             metadata = fetch(request)
             digest = verify_file(partial, spec["sha256"].get(file))
         except Exception as exc:

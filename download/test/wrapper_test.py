@@ -77,8 +77,8 @@ def http_server() -> Iterator[str]:
 
 @pytest.fixture
 def workdir(tmp_path: Path) -> Path:
-    """Copy of the test directory, next to a `master` link to the wrappers for `--wrapper-prefix`."""
-    (tmp_path / "master").symlink_to(TEST_DIR.parents[1])
+    """Copy of the test directory, next to a `main` link to the wrappers for `--wrapper-prefix`."""
+    (tmp_path / "main").symlink_to(TEST_DIR.parents[1])
     return Path(
         shutil.copytree(
             TEST_DIR, tmp_path / "test", ignore=shutil.ignore_patterns("__pycache__")
@@ -106,6 +106,7 @@ def hosts(http_server: str) -> dict[str, dict]:
     all_hosts = [
         host("file_ok", "file:source/{version}/{region}.txt"),
         host("file_broken", "file:///nonexistent/{file}"),
+        host("file_placeholder", "file:source/{version}/{country}.txt"),
         host("api_ok", "fake://{region}", content=CONTENTS["api_ok"]),
         host("api_broken", "fake://{region}", fail="API is down"),
         host("api_secret", "fake://{region}", token_env=TOKEN_ENV),
@@ -188,6 +189,7 @@ def test_example(workdir: Path):
     ("order", "expected"),
     [
         (["file_broken", "file_ok"], "file_ok"),
+        (["file_placeholder", "file_ok"], "file_ok"),
         (["api_broken", "file_ok"], "file_ok"),
         (["api_secret", "file_ok"], "file_ok"),
         (["file_broken", "api_ok"], "api_ok"),
@@ -213,6 +215,7 @@ def test_host_fallback(
     ("name", "file", "message"),
     [
         ("file_broken", FILE, "File not found"),
+        ("file_placeholder", FILE, "needs placeholder 'country'"),
         ("api_broken", FILE, "API is down"),
         (
             "api_secret",

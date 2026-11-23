@@ -13,4 +13,4 @@ rule download:
         dataset=config["dataset"],
         spec=config["spec"],
     wrapper:
-        "master/download"
+        "main/download"

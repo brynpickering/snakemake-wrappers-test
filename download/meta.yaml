@@ -43,3 +43,6 @@ notes: |
   * Hosts are read from `snakemake.config` rather than params, so that changing hosts does not trigger reruns.
     Changes to `input.handlers` (the handler modules) do trigger reruns.
     Changes to `params.spec` (e.g., a new checksum) do trigger reruns.
+  * Workflows importing several modules that share a `<downloads>` folder can `include:` `share.smk`
+    after their last `use rule` statement. It orders the download rules writing the same files by module import order,
+    and fails if those modules resolve different registry entries for the dataset (ignoring `description` and `version`).
